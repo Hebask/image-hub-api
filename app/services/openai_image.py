@@ -1,31 +1,19 @@
 import base64
-from pathlib import Path
+import os
 from openai import OpenAI
 from app.core.config import settings
-from app.services.storage import ensure_dirs
 
-def generate_image(prompt: str, size: str = "1024x1024"):
-    if not settings.openai_api_key or "YOUR_" in settings.openai_api_key:
-        raise RuntimeError("Missing OPENAI_API_KEY in .env")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    client = OpenAI(api_key=settings.openai_api_key)
-    base = ensure_dirs()
-    out_dir = Path(settings.storage_dir) / "images" / "generated"
-    out_dir.mkdir(parents=True, exist_ok=True)
+def generate_image_bytes(prompt: str) -> bytes:
+    model = getattr(settings, "openai_image_model", None) or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
-    result = client.images.generate(
-        model=settings.openai_image_model,
+    res = client.images.generate(
+        model=model,
         prompt=prompt,
-        size=size,
+        size="1024x1024"
     )
 
-    img = result.data[0]
-    if getattr(img, "b64_json", None):
-        data = base64.b64decode(img.b64_json)
-        path = out_dir / "generated.png"
-        path.write_bytes(data)
-        return {"saved_path": str(path).replace("\\", "/")}
-    elif getattr(img, "url", None):
-        return {"url": img.url}
-    else:
-        return {"result": "No image returned (unexpected format)"}
+    # OpenAI returns base64 image data
+    b64 = res.data[0].b64_json
+    return base64.b64decode(b64)
