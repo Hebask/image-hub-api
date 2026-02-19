@@ -13,4 +13,8 @@ class Settings(BaseModel):
     openai_vision_model: str = os.getenv("OPENAI_VISION_MODEL", "gpt-4.1-mini")
     openai_image_model: str = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
+    bing_api_key: str | None = os.getenv("BING_API_KEY")
+    bing_endpoint: str = os.getenv("BING_ENDPOINT", "https://api.bing.microsoft.com/v7.0/images/search")
+
+
 settings = Settings()

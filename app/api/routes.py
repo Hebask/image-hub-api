@@ -1,39 +1,24 @@
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response  # ✅ add this
 from pydantic import BaseModel, Field
 from typing import Literal, List, Optional
-from app.services.openai_edit import edit_image_bytes
+from pathlib import Path
+import json
+
 from app.providers.unsplash import UnsplashProvider
 from app.services.downloader import download_images
 from app.services.image_edit import edit_image
 from app.services.openai_vision import ask_about_image
 from app.services.openai_image import generate_image_bytes
+from app.services.openai_edit import edit_image_bytes
 from app.services.storage import ensure_dirs
 from app.core.config import settings
-from app.services.storage import ensure_dirs
-from pathlib import Path
-import json
-import base64
 
 router = APIRouter()
 
 ProviderName = Literal["unsplash"]
 
-class RecreateFromDatasetRequest(BaseModel):
-    folder: str                 
-    index: int = 0             
-    out_folder: str = "recreated"
-    out_filename: str | None = None
-    prompt_prefix: str = "Photorealistic, high quality, soft lighting. "
-
-class ImageGenerateRequest(BaseModel):
-    prompt: str
-    folder: str = "generated"
-    filename: str = "generated.png"
-
-class VisionBatchRequest(BaseModel):
-    folder: str
-    question: str = "Describe the image in one sentence."
-
+# Models
 class SearchResponseItem(BaseModel):
     provider: str
     id: str
@@ -45,29 +30,79 @@ class SearchResponseItem(BaseModel):
     author: Optional[str] = None
     license: Optional[str] = None
 
+class ImageGenerateSaveRequest(BaseModel):
+    prompt: str
+    size: Optional[str] = "1024x1024"
+    folder: str = "generated"
+    filename: str = "generated.png"
+
+class ImageGenerateRawRequest(BaseModel):
+    prompt: str
+    size: Optional[str] = "1024x1024"
+    format: Literal["png", "jpeg", "webp"] = "png"
+
+class VisionBatchRequest(BaseModel):
+    folder: str
+    question: str = "Describe the image in one sentence."
+
+class DownloadRequest(BaseModel):
+    items: List[SearchResponseItem]
+    folder: str = Field(default="images", description="Subfolder under storage/images")
+
+class EditRequest(BaseModel):
+    image_path: str
+    action: Literal["resize","rotate","convert","crop","compress"]
+    width: Optional[int] = None
+    height: Optional[int] = None
+    degrees: Optional[int] = None
+    format: Optional[Literal["JPEG","PNG","WEBP"]] = None
+    crop_box: Optional[List[int]] = None  # [left, top, right, bottom]
+    quality: Optional[int] = None  # 1-95
+
+class VisionAskRequest(BaseModel):
+    image_path: str
+    question: str
+
+class RecreateFromDatasetRequest(BaseModel):
+    folder: str
+    index: int = 0
+    out_folder: str = "recreated"
+    out_filename: str | None = None
+    prompt_prefix: str = "Photorealistic, high quality, soft lighting. "
+
 class ImageEditRequest(BaseModel):
     image_path: str
     instruction: str
     out_folder: str = "edited"
     out_filename: str = "edited.png"
-    mask_path: Optional[str] = None  
+    mask_path: Optional[str] = None
 
+# Routes
 @router.get("/health")
 def health():
     return {"status": "ok"}
 
-@router.post("/image/generate")
-def image_generate(req: ImageGenerateRequest):
-    ensure_dirs()
-    out_dir = Path(settings.storage_dir) / "images" / req.folder
-    out_dir.mkdir(parents=True, exist_ok=True)
+@router.get("/search", response_model=List[SearchResponseItem])
+def search(q: str, provider: ProviderName = "unsplash", limit: int = 24):
+    q = q.replace("q=", "").split("&")[0].strip()
+    if provider == "unsplash":
+        p = UnsplashProvider()
+        return p.search(q=q, limit=limit)
+    raise HTTPException(400, "Unknown provider")
 
-    img_bytes = generate_image_bytes(prompt=req.prompt)
+@router.post("/download")
+def download(req: DownloadRequest):
+    return download_images(req.items, folder=req.folder)
 
-    out_path = out_dir / req.filename
-    out_path.write_bytes(img_bytes)
+@router.post("/edit")
+def edit(req: EditRequest):
+    out = edit_image(**req.model_dump())
+    return {"output_path": out}
 
-    return {"saved_path": str(out_path).replace("\\", "/")}
+@router.post("/vision/ask")
+def vision_ask(req: VisionAskRequest):
+    answer = ask_about_image(image_path=req.image_path, question=req.question)
+    return {"answer": answer}
 
 @router.post("/vision/batch")
 def vision_batch(req: VisionBatchRequest):
@@ -87,7 +122,6 @@ def vision_batch(req: VisionBatchRequest):
         if not img_path:
             continue
 
-        # skip if already answered for this same question
         qa = item.get("vision_qa", [])
         if any(x.get("q") == req.question for x in qa):
             continue
@@ -101,56 +135,32 @@ def vision_batch(req: VisionBatchRequest):
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return {"folder": req.folder, "updated": updated, "metadata": str(meta_path).replace("\\", "/")}
 
-@router.get("/search", response_model=List[SearchResponseItem])
-def search(q: str, provider: ProviderName = "unsplash", limit: int = 24):
-    q = q.replace("q=", "").split("&")[0].strip()
-    if provider == "unsplash":
-        p = UnsplashProvider()
-        return p.search(q=q, limit=limit)
-    raise HTTPException(400, "Unknown provider")
-
-class DownloadRequest(BaseModel):
-    items: List[SearchResponseItem]
-    folder: str = Field(default="images", description="Subfolder under storage/images")
-
-@router.post("/download")
-def download(req: DownloadRequest):
-    result = download_images(req.items, folder=req.folder)
-    return result
-
-class EditRequest(BaseModel):
-    image_path: str
-    action: Literal["resize","rotate","convert","crop","compress"]
-    width: Optional[int] = None
-    height: Optional[int] = None
-    degrees: Optional[int] = None
-    format: Optional[Literal["JPEG","PNG","WEBP"]] = None
-    crop_box: Optional[List[int]] = None  # [left, top, right, bottom]
-    quality: Optional[int] = None  # 1-95
-
-@router.post("/edit")
-def edit(req: EditRequest):
-    out = edit_image(**req.model_dump())
-    return {"output_path": out}
-
-class VisionAskRequest(BaseModel):
-    image_path: str
-    question: str
-
-@router.post("/vision/ask")
-def vision_ask(req: VisionAskRequest):
-    answer = ask_about_image(image_path=req.image_path, question=req.question)
-    return {"answer": answer}
-
-class GenerateRequest(BaseModel):
-    prompt: str
-    size: Optional[str] = "1024x1024"
-
+# generate AND save
 @router.post("/image/generate")
-def image_generate(req: GenerateRequest):
-    out = generate_image_bytes(prompt=req.prompt, size=req.size)
-    return out
+def image_generate_save(req: ImageGenerateSaveRequest):
+    ensure_dirs()
+    out_dir = Path(settings.storage_dir) / "images" / req.folder
+    out_dir.mkdir(parents=True, exist_ok=True)
 
+    img_bytes = generate_image_bytes(prompt=req.prompt, size=req.size)
+
+    out_path = out_dir / req.filename
+    out_path.write_bytes(img_bytes)
+
+    return {"saved_path": str(out_path).replace("\\", "/"), "size": req.size}
+
+# generate and return raw image bytes
+@router.post("/image/generate/raw")
+def image_generate_raw(req: ImageGenerateRawRequest):
+    img_bytes = generate_image_bytes(prompt=req.prompt, size=req.size)
+
+    media_type = {
+        "png": "image/png",
+        "jpeg": "image/jpeg",
+        "webp": "image/webp",
+    }[req.format]
+
+    return Response(content=img_bytes, media_type=media_type)
 
 @router.post("/image/recreate-from-dataset")
 def recreate_from_dataset(req: RecreateFromDatasetRequest):
@@ -170,7 +180,6 @@ def recreate_from_dataset(req: RecreateFromDatasetRequest):
     if not qa:
         raise HTTPException(400, "No vision_qa found. Run POST /vision/batch first.")
 
-    # take last answer as caption/prompt base
     caption = qa[-1].get("a") or ""
     if not caption.strip():
         raise HTTPException(400, "No caption answer found in vision_qa.")
@@ -180,7 +189,6 @@ def recreate_from_dataset(req: RecreateFromDatasetRequest):
     out_dir = Path(settings.storage_dir) / "images" / req.out_folder
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # default filename: provider_id_recreated.png
     default_name = f"{item.get('provider','img')}_{item.get('id','item')}_recreated.png"
     filename = req.out_filename or default_name
     out_path = out_dir / filename
@@ -188,7 +196,6 @@ def recreate_from_dataset(req: RecreateFromDatasetRequest):
     img_bytes = generate_image_bytes(prompt=prompt)
     out_path.write_bytes(img_bytes)
 
-    # write back into metadata
     item["recreated_path"] = str(out_path).replace("\\", "/")
     item["recreated_prompt"] = prompt
     meta[req.index] = item
