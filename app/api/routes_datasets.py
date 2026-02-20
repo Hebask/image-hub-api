@@ -5,7 +5,7 @@ from app.services.dataset_export import export_folder_as_zip
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 class ExportRequest(BaseModel):
-    folder: str  # example: "cats_test"
+    folder: str  
     zip_name: str = "dataset.zip"
 
 @router.post("/export")
